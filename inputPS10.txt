@@ -1,0 +1,9 @@
+# Sample input file for water quality prediction
+# Question 2: Predict water quality
+ph 3.72
+Hardness 204.89
+Solids 20791.32
+Chloramines 7.3
+Sulfate 368.5
+Conductivity 564.30
+Turbidity 2.96
