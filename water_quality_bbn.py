@@ -42,6 +42,9 @@ class WaterQualityBBN:
             self.data = pd.read_csv(data_file)
             print(f"Data loaded successfully. Shape: {self.data.shape}")
             print(f"Columns: {list(self.data.columns)}")
+            # Handle missing values - drop rows with missing values
+            self.data = self.data.dropna()
+            print(f"After removing missing values. Shape: {self.data.shape}")
         except FileNotFoundError:
             raise FileNotFoundError(f"Data file {data_file} not found")
         except Exception as e:
@@ -63,7 +66,7 @@ class WaterQualityBBN:
         
         for col in continuous_cols:
             if col in self.discretized_data.columns:
-                # Discretize into 3 categories: low (0), medium (1), high (2)
+                # Discretize into 3 categories: low, medium, high (string labels)
                 self.discretized_data[col] = pd.qcut(
                     self.discretized_data[col], 
                     q=3, 
@@ -75,7 +78,7 @@ class WaterQualityBBN:
     
     def construct_bbn(self):
         """
-        Construct Bayesian Belief Network structure
+        Question 1: Construct Bayesian Belief Network structure
         Using a simplified structure where all attributes influence Potability
         """
         if self.discretized_data is None:
@@ -157,7 +160,7 @@ class WaterQualityBBN:
     
     def predict_potability(self, input_dict):
         """
-        Predict water potability for given input values
+        Question 2: Predict water potability for given input values
         
         Args:
             input_dict: Dictionary with attribute names and values
@@ -198,7 +201,7 @@ class WaterQualityBBN:
     
     def infer_probability(self, input_dict):
         """
-        Infer probability for given attribute values including Potability
+        Question 3: Infer probability for given attribute values including Potability
         
         Args:
             input_dict: Dictionary with all attribute names and values
@@ -234,8 +237,8 @@ class WaterQualityBBN:
     
     def infer_conditional_probability(self, conditions):
         """
-        Find probability of water quality being good under specific conditions
-        e.g., low ph, high hardness, high solids, etc.
+        Question 4: Find probability of water quality being good under specific conditions
+        e.g., low ph, high hardness, high solids, and other chemicals
         
         Args:
             conditions: Dictionary with attribute names and desired categories
@@ -274,7 +277,7 @@ class WaterQualityBBN:
 
 def read_input_file(input_file):
     """
-    Read input from inputPSXX.txt file
+    Read input from inputPS10.txt file
     
     Args:
         input_file: Path to input file
@@ -304,7 +307,7 @@ def read_input_file(input_file):
 
 def write_output_file(output_file, results, query_type):
     """
-    Write results to outputPSXX.txt file
+    Write results to outputPS10.txt file
     
     Args:
         output_file: Path to output file
@@ -333,7 +336,7 @@ def main():
     Main function to run the water quality prediction
     """
     # Configuration
-    data_file = 'water_quality.csv'  # Update with actual data file path
+    data_file = 'water_potability.csv'  # Update with actual data file path
     input_file = 'inputPS10.txt'
     output_file = 'outputPS10.txt'
     
@@ -349,7 +352,7 @@ def main():
         print("\nBayesian Belief Network constructed and trained successfully\n")
     except Exception as e:
         print(f"\nError: {str(e)}")
-        print("\nPlease ensure 'water_quality.csv' file exists in the directory")
+        print("\nPlease ensure 'water_potability.csv' file exists in the directory")
         print("The CSV file should contain columns: ph, Hardness, Solids, Chloramines,")
         print("Sulfate, Conductivity, Organic_carbon, Trihalomethanes, Turbidity, Potability")
         return

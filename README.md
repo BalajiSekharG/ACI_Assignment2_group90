@@ -42,7 +42,7 @@ You need to provide the water quality dataset as `water_quality.csv` in the same
    ```
 
 2. **Prepare your data:**
-   - Place your water quality dataset as `water_quality.csv` in the same directory
+   - Place your water quality dataset as `water_potability.csv` in the same directory
    - Ensure the CSV has all required columns
 
 3. **Run the program:**
