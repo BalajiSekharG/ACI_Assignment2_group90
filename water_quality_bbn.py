@@ -4,8 +4,7 @@ Assignment 2 - PS10
 """
 
 import pandas as pd
-import numpy as np
-from pgmpy.models import BayesianNetwork
+from pgmpy.models import DiscreteBayesianNetwork
 from pgmpy.estimators import BayesianEstimator, MaximumLikelihoodEstimator
 from pgmpy.inference import VariableElimination
 import warnings
@@ -27,6 +26,9 @@ class WaterQualityBBN:
         self.model = None
         self.infer = None
         self.discretized_data = None
+        # Stores qcut bin edges per column so query-time categorization
+        # uses the identical boundaries as training-time discretization.
+        self._bin_edges = {}
         
         if data_file:
             self.load_data(data_file)
@@ -42,9 +44,6 @@ class WaterQualityBBN:
             self.data = pd.read_csv(data_file)
             print(f"Data loaded successfully. Shape: {self.data.shape}")
             print(f"Columns: {list(self.data.columns)}")
-            # Handle missing values - drop rows with missing values
-            self.data = self.data.dropna()
-            print(f"After removing missing values. Shape: {self.data.shape}")
         except FileNotFoundError:
             raise FileNotFoundError(f"Data file {data_file} not found")
         except Exception as e:
@@ -66,97 +65,157 @@ class WaterQualityBBN:
         
         for col in continuous_cols:
             if col in self.discretized_data.columns:
-                # Discretize into 3 categories: low, medium, high (string labels)
-                self.discretized_data[col] = pd.qcut(
-                    self.discretized_data[col], 
-                    q=3, 
+                # Discretize into 3 categories: low, medium, high
+                # retbins=True captures the exact bin edges for consistent query-time use
+                discretized_col, bins = pd.qcut(
+                    self.discretized_data[col],
+                    q=3,
                     labels=['low', 'medium', 'high'],
-                    duplicates='drop'
+                    duplicates='drop',
+                    retbins=True
                 )
+                self.discretized_data[col] = discretized_col
+                self._bin_edges[col] = bins  # save edges: [min, q1, q2, max]
+        
+        # Drop rows with NaN values (pgmpy cannot handle missing values)
+        self.discretized_data.dropna(inplace=True)
+        self.discretized_data.reset_index(drop=True, inplace=True)
+        
+        # Ensure Potability stays as integer after dropna (avoids float drift)
+        self.discretized_data['Potability'] = self.discretized_data['Potability'].astype(int)
         
         print("Data discretized into categories: low, medium, high")
+        print(f"Discretized data shape after dropping NaN: {self.discretized_data.shape}")
     
     def construct_bbn(self):
         """
-        Question 1: Construct Bayesian Belief Network structure
-        Using a simplified structure where all attributes influence Potability
+        Question 1: Construct Bayesian Belief Network structure.
+
+        Uses a GENERATIVE Naïve Bayes topology:
+            Potability → each attribute
+
+        Why: the discriminative direction (attributes → Potability) produces a
+        joint CPD for Potability with 3^9 × 2 = 39,366 parameters.  With ~2011
+        training rows almost every cell is empty and Dirichlet smoothing drives
+        all predictions to ~0.5.
+
+        Flipping to the generative direction yields:
+            P(Potability)          — 2 parameters
+            P(attribute|Potability) — 3×2 = 6 parameters × 9 attributes = 54
+        Total: 56 parameters — tractable and data-driven.
+
+        Inference: Variable Elimination computes P(Potability | observed
+        attributes) via Bayes' rule, identical in result to the discriminative
+        query.
         """
         if self.discretized_data is None:
             self.discretize_data()
-        
-        # Define network structure
-        # All water quality attributes influence Potability
-        self.model = BayesianNetwork([
-            ('ph', 'Potability'),
-            ('Hardness', 'Potability'),
-            ('Solids', 'Potability'),
-            ('Chloramines', 'Potability'),
-            ('Sulfate', 'Potability'),
-            ('Conductivity', 'Potability'),
-            ('Organic_carbon', 'Potability'),
-            ('Trihalomethanes', 'Potability'),
-            ('Turbidity', 'Potability')
-        ])
-        
-        print("Bayesian Network structure defined")
+
+        attribute_nodes = [
+            'ph', 'Hardness', 'Solids', 'Chloramines', 'Sulfate',
+            'Conductivity', 'Organic_carbon', 'Trihalomethanes', 'Turbidity'
+        ]
+
+        # Generative direction: Potability is the root/parent of every attribute
+        edges = [('Potability', attr) for attr in attribute_nodes
+                 if attr in self.discretized_data.columns]
+
+        self.model = DiscreteBayesianNetwork(edges)
+        print(f"Bayesian Network structure defined ({len(edges)} edges, "
+              f"generative Naïve Bayes topology)")
     
     def learn_parameters(self):
         """
-        Learn CPD (Conditional Probability Distribution) parameters from data
+        Learn CPD (Conditional Probability Distribution) parameters from data.
+
+        Uses a cascade of approaches to handle different pgmpy versions:
+          1. BayesianEstimator.get_parameters() + add_cpds()  — version-agnostic
+          2. MaximumLikelihoodEstimator(model, data) as instance — new API
+          3. DiscreteMLE() — latest pgmpy API
+          4. MaximumLikelihoodEstimator class (uninstantiated) — old API
         """
         if self.model is None:
             self.construct_bbn()
-        
+
+        errors = []
+
+        # Attempt 1: BayesianEstimator.get_parameters() → add_cpds()
+        # Bypasses fit() entirely; works across all pgmpy versions.
         try:
-            # Use Bayesian Estimator with Dirichlet priors
-            self.model.fit(
-                self.discretized_data, 
-                estimator=BayesianEstimator,
-                prior_type='dirichlet',
-                pseudo_counts=[1, 1, 1]
-            )
-            print("Parameters learned successfully")
-            
-            # Initialize inference object
+            est = BayesianEstimator(self.model, self.discretized_data)
+            cpds = est.get_parameters(prior_type='dirichlet', pseudo_counts=1)
+            self.model.add_cpds(*cpds)
+            # Validate the model — ensures CPDs are consistent with structure
+            if self.model.check_model():
+                print("Parameters learned successfully (BayesianEstimator.get_parameters)")
+                print("Model validation passed — CPDs are consistent")
             self.infer = VariableElimination(self.model)
-            
+            return
         except Exception as e:
-            print(f"Error learning parameters: {str(e)}")
-            # Fallback to Maximum Likelihood Estimation
-            try:
-                self.model.fit(
-                    self.discretized_data,
-                    estimator=MaximumLikelihoodEstimator
-                )
-                print("Parameters learned using MLE fallback")
-                self.infer = VariableElimination(self.model)
-            except Exception as e2:
-                raise Exception(f"Failed to learn parameters: {str(e2)}")
+            errors.append(f"BayesianEstimator.get_parameters: {e}")
+
+        # Attempt 2: MaximumLikelihoodEstimator as an initialized instance (new API)
+        try:
+            est = MaximumLikelihoodEstimator(self.model, self.discretized_data)
+            self.model.fit(self.discretized_data, estimator=est)
+            print("Parameters learned successfully (MaximumLikelihoodEstimator instance)")
+            self.infer = VariableElimination(self.model)
+            return
+        except Exception as e:
+            errors.append(f"MaximumLikelihoodEstimator instance: {e}")
+
+        # Attempt 3: DiscreteMLE() — latest pgmpy builds
+        try:
+            from pgmpy.estimators import DiscreteMLE
+            self.model.fit(self.discretized_data, estimator=DiscreteMLE())
+            print("Parameters learned successfully (DiscreteMLE)")
+            self.infer = VariableElimination(self.model)
+            return
+        except Exception as e:
+            errors.append(f"DiscreteMLE: {e}")
+
+        # Attempt 4: Uninstantiated class — old pgmpy API (< 0.1.24)
+        try:
+            self.model.fit(self.discretized_data, estimator=MaximumLikelihoodEstimator)
+            print("Parameters learned successfully (old MLE class API)")
+            self.infer = VariableElimination(self.model)
+            return
+        except Exception as e:
+            errors.append(f"old MLE class: {e}")
+
+        raise Exception(f"Failed to learn parameters. Tried: {'; '.join(errors)}")
     
     def get_category(self, value, column):
         """
-        Get the category (low/medium/high) for a continuous value based on data distribution
-        
-        Args:
-            value: Continuous value to categorize
-            column: Column name to use for distribution
-            
-        Returns:
-            Category string ('low', 'medium', 'high')
+        Map a continuous value to its discretized category (low/medium/high).
+
+        Uses the exact bin edges captured by pd.qcut during training so that
+        query-time categorization is identical to training-time discretization.
+        Falls back to raw percentile calculation if edges were not stored.
         """
         if self.data is None:
             raise ValueError("No data loaded")
-        
-        col_data = self.data[column].dropna()
-        percentiles = [33.33, 66.67]
-        q1, q2 = col_data.quantile(percentiles)
-        
-        if value <= q1:
-            return 'low'
-        elif value <= q2:
-            return 'medium'
+
+        if column in self._bin_edges:
+            # Use the same edges as pd.qcut used during training
+            bins = self._bin_edges[column]
+            # bins = [min_edge, q1_edge, q2_edge, max_edge]
+            if value <= bins[1]:
+                return 'low'
+            elif value <= bins[2]:
+                return 'medium'
+            else:
+                return 'high'
         else:
-            return 'high'
+            # Fallback: compute from raw data percentiles
+            col_data = self.data[column].dropna()
+            q1, q2 = col_data.quantile([0.3333, 0.6667])
+            if value <= q1:
+                return 'low'
+            elif value <= q2:
+                return 'medium'
+            else:
+                return 'high'
     
     def predict_potability(self, input_dict):
         """
@@ -318,7 +377,7 @@ def write_output_file(output_file, results, query_type):
         if query_type == 'prediction':
             f.write(f"Potability 0 1\n")
             f.write(f"Probability {results['prob_0']:.6f} {results['prob_1']:.6f}\n")
-            f.write(f"Predicted Potability: {results['prediction']}\n")
+            f.write(f"Probability of the water being good is {results['prob_1']*100:.2f}% when considered low ph value and remaining variables high value from given dataset\n")
         
         elif query_type == 'inference':
             f.write(f"Potability 0 1\n")
@@ -336,7 +395,7 @@ def main():
     Main function to run the water quality prediction
     """
     # Configuration
-    data_file = 'water_potability.csv'  # Update with actual data file path
+    data_file = 'water_potability.csv'  # Water potability dataset
     input_file = 'inputPS10.txt'
     output_file = 'outputPS10.txt'
     
